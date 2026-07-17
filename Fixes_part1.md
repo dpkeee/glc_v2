@@ -190,14 +190,14 @@ User-controlled URL fetches must never reach loopback/private/link-local/interna
 
 ## Verification After Fix
 
-Validated with unit tests:
+Validated with focused tests:
 
 - `tests/test_image_url_ssrf.py::test_image_fetch_rejects_without_allowlist`
 - `tests/test_image_url_ssrf.py::test_image_fetch_blocks_private_ipv4_even_with_wildcard`
 - `tests/test_image_url_ssrf.py::test_image_fetch_blocks_ipv6_loopback`
 - `tests/test_image_url_ssrf.py::test_image_fetch_rechecks_destination_on_redirect`
 
-Test run:
+Command:
 
 ```powershell
 uv run pytest tests/test_image_url_ssrf.py tests/test_v9_compat.py::test_chat_request_minimal_body_validates
@@ -205,4 +205,54 @@ uv run pytest tests/test_image_url_ssrf.py tests/test_v9_compat.py::test_chat_re
 
 Observed result:
 
-- All tests passed, confirming allowlist enforcement, private-range blocking for IPv4/IPv6, and redirect-hop re-validation.
+- All tests passed, confirming allowlist enforcement, IPv4/IPv6 private-range blocking, and redirect-hop re-validation.
+
+## 5. Tenant Scoping for Usage and Cost Read Endpoints
+
+## Finding
+
+The usage and cost read endpoints exposed cross-tenant activity because results were not scoped to the requesting tenant:
+
+- `/v1/calls`
+- `/v1/cost/by_agent`
+
+## Reproduction
+
+Commands (same auth, different tenant headers):
+
+```powershell
+curl.exe -sS -H "Authorization: Bearer <gateway_token>" -H "X-GLC-Tenant: tenant_a" "https://rainitover--glc-v1-gateway-fastapi-app.modal.run/v1/calls"
+curl.exe -sS -H "Authorization: Bearer <gateway_token>" -H "X-GLC-Tenant: tenant_b" "https://rainitover--glc-v1-gateway-fastapi-app.modal.run/v1/calls"
+
+curl.exe -sS -H "Authorization: Bearer <gateway_token>" -H "X-GLC-Tenant: tenant_a" "https://rainitover--glc-v1-gateway-fastapi-app.modal.run/v1/cost/by_agent"
+curl.exe -sS -H "Authorization: Bearer <gateway_token>" -H "X-GLC-Tenant: tenant_b" "https://rainitover--glc-v1-gateway-fastapi-app.modal.run/v1/cost/by_agent"
+```
+
+Observed result (before fix):
+
+- Tenant A and Tenant B could view records from a shared/global ledger view.
+
+## Fix Implemented
+
+Implemented tenant-aware read/write scoping:
+
+- Added `tenant` column and index in `glc/db.py` and backfilled schema migration via `PRAGMA table_info` + `ALTER TABLE` when missing.
+- Added `tenant` write-through in `db.log_call(...)` for chat/router/embed call logging.
+- Added tenant filtering to:
+	- `db.recent(..., tenant=...)` used by `/v1/calls`
+	- `db.by_agent(..., tenant=...)` used by `/v1/cost/by_agent`
+- Added header-based tenant resolver `tenant_from_headers(...)` in `glc/security/auth.py`:
+	- Header precedence: `X-GLC-Tenant`, then `X-Tenant-ID`
+	- Defaults to `default` tenant when header is absent
+	- Rejects invalid tenant identifiers with `400`
+
+## Security Invariant
+
+Usage and cost telemetry must be visible only to records belonging to the requesting tenant.
+
+
+
+
+
+
+

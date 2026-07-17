@@ -8,6 +8,7 @@ back to the per-installation token used by control/websocket surfaces.
 from __future__ import annotations
 
 import os
+import re
 
 from fastapi import HTTPException
 
@@ -35,3 +36,18 @@ def require_gateway_bearer(authorization: str | None) -> None:
     presented = authorization.removeprefix("Bearer ").strip()
     if presented != expected:
         raise HTTPException(403, "gateway token mismatch")
+
+
+def tenant_from_headers(headers) -> str:
+    """Resolve tenant ID from request headers.
+
+    Header precedence:
+    1) X-GLC-Tenant
+    2) X-Tenant-ID
+    """
+    tenant = (headers.get("x-glc-tenant") or headers.get("x-tenant-id") or "").strip()
+    if not tenant:
+        return "default"
+    if len(tenant) > 64 or not re.fullmatch(r"[A-Za-z0-9._-]+", tenant):
+        raise HTTPException(400, "invalid tenant identifier")
+    return tenant

@@ -39,6 +39,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.auth import tenant_from_headers
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -213,7 +214,7 @@ def _parse_tier(text: str) -> str | None:
     return None
 
 
-async def _classify_tier(req, role, router_pool, prompt_text):
+async def _classify_tier(req, role, router_pool, prompt_text, tenant: str):
     estimated = _estimate_tokens(prompt_text)
     if estimated > 8000:
         return RouterDecision(
@@ -271,6 +272,7 @@ async def _classify_tier(req, role, router_pool, prompt_text):
                     prompt_chars=len(envelope),
                     call_role=call_role,
                     router_decision="unparseable",
+                    tenant=tenant,
                 )
                 continue
             db.log_call(
@@ -284,6 +286,7 @@ async def _classify_tier(req, role, router_pool, prompt_text):
                 response_chars=len(result.get("text", "")),
                 call_role=call_role,
                 router_decision=tier,
+                tenant=tenant,
             )
             return RouterDecision(
                 role=role,
@@ -305,6 +308,7 @@ async def _classify_tier(req, role, router_pool, prompt_text):
                 latency_ms=latency,
                 call_role=call_role,
                 router_decision="error",
+                tenant=tenant,
             )
             continue
     return RouterDecision(
@@ -443,6 +447,7 @@ async def chat(req: ChatRequest, request: Request):
     rtr = state.router
     router_pool = state.router_pool
     messages = _normalize_messages(req)
+    tenant = tenant_from_headers(request.headers)
     if any(P._content_has_image(m.get("content")) for m in messages):
         messages = await _resolve_image_urls(messages)
     system_blocks = _system_blocks(req)
@@ -467,7 +472,7 @@ async def chat(req: ChatRequest, request: Request):
     retries = 0
     router_decision: RouterDecision | None = None
     if req.auto_route and not req.provider:
-        router_decision = await _classify_tier(req, req.auto_route, router_pool, prompt_text)
+        router_decision = await _classify_tier(req, req.auto_route, router_pool, prompt_text, tenant)
         if router_decision.tier == "HUGE":
             raise HTTPException(
                 503,
@@ -547,6 +552,7 @@ async def chat(req: ChatRequest, request: Request):
                             attempted=_attempts_str(all_attempts),
                             agent=req.agent,
                             session=req.session,
+                            tenant=tenant,
                             retries=retries,
                         )
                         yield f"data: {json.dumps({'done': True, 'provider': name})}\n\n"
@@ -562,6 +568,7 @@ async def chat(req: ChatRequest, request: Request):
                             attempted=_attempts_str(all_attempts),
                             agent=req.agent,
                             session=req.session,
+                            tenant=tenant,
                             retries=retries,
                         )
                         yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
@@ -655,6 +662,7 @@ async def chat(req: ChatRequest, request: Request):
                 router_decision=router_decision.tier if router_decision else None,
                 agent=req.agent,
                 session=req.session,
+                tenant=tenant,
                 retries=retries,
             )
             return ChatResponse(
@@ -691,6 +699,7 @@ async def chat(req: ChatRequest, request: Request):
                 attempted=_attempts_str(all_attempts),
                 agent=req.agent,
                 session=req.session,
+                tenant=tenant,
                 retries=retries,
             )
             tag = f"failed: {str(e)[:100]}"
@@ -719,6 +728,7 @@ async def chat(req: ChatRequest, request: Request):
                 attempted=_attempts_str(all_attempts),
                 agent=req.agent,
                 session=req.session,
+                tenant=tenant,
                 retries=retries,
             )
             all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
@@ -774,6 +784,7 @@ async def embed(req: EmbedRequest, request: Request):
     from glc import embedders as E
 
     state = request.app.state
+    tenant = tenant_from_headers(request.headers)
     embedders = state.embedders
     if not embedders:
         raise HTTPException(503, "no embedding providers configured")
@@ -802,6 +813,7 @@ async def embed(req: EmbedRequest, request: Request):
             prompt_chars=len(req.text),
             override=req.provider,
             call_role="embed",
+            tenant=tenant,
         )
         if req.provider:
             if e.status == 429:
@@ -821,6 +833,7 @@ async def embed(req: EmbedRequest, request: Request):
         attempted=_attempts_str(attempts),
         call_role="embed",
         embed_dim=result["dim"],
+        tenant=tenant,
     )
     return EmbedResponse(
         provider=name,
@@ -849,10 +862,11 @@ async def list_embedders(request: Request):
 
 
 @router.get("/v1/cost/by_agent")
-async def cost_by_agent(session: str | None = None, agent: str | None = None):
+async def cost_by_agent(request: Request, session: str | None = None, agent: str | None = None):
     from glc import pricing as _pricing
 
-    raw = db.by_agent(session=session)
+    tenant = tenant_from_headers(request.headers)
+    raw = db.by_agent(session=session, tenant=tenant)
     if agent:
         raw = {agent: raw.get(agent, [])}
     out: dict[str, list[dict]] = {}
@@ -922,5 +936,6 @@ async def routers(request: Request):
 
 
 @router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+async def calls(request: Request, limit: int = 100, provider: str | None = None, status: str | None = None):
+    tenant = tenant_from_headers(request.headers)
+    return db.recent(limit=limit, provider=provider, status=status, tenant=tenant)
