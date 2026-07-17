@@ -31,6 +31,26 @@ from typing import Any
 
 import httpx
 
+
+PROVIDER_SECRET_ENV_VARS = (
+    "GEMINI_API_KEY",
+    "GITHUB_ACCESS_TOKEN",
+    "GROQ_API_KEY",
+    "NVIDIA_API_KEY",
+    "CEREBRAS_API_KEY",
+    "OPEN_ROUTER_API_KEY",
+)
+
+
+def scrub_provider_key_env() -> None:
+    """Best-effort env hygiene after provider bootstrap.
+
+    This reduces accidental later reads from os.environ in the running process,
+    but is NOT a hard isolation boundary between in-process components.
+    """
+    for var in PROVIDER_SECRET_ENV_VARS:
+        os.environ.pop(var, None)
+
 # ────────────────────────────────────────────────────────────────────────────
 # V9 multimodal helpers
 # ────────────────────────────────────────────────────────────────────────────

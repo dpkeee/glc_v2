@@ -303,19 +303,37 @@ Examples of sanitized responses:
 
 Client-facing errors must not disclose provider names, upstream hostnames, or raw upstream payloads.
 
-## Verification After Fix
+## Leaks
 
-Command:
+1. Dump every provider key (Leak 1)
+
+## Partial Mitigation (Defense-in-Depth)
+
+Implemented a partial mitigation to reduce accidental secret exposure from process environment variables:
+
+- Added `scrub_provider_key_env()` and `PROVIDER_SECRET_ENV_VARS` in `glc/providers.py`.
+- Called scrub step at startup in `glc/main.py` after provider objects are created.
+- Added `GLC_SCRUB_PROVIDER_KEYS` toggle (default enabled: `1`).
+- Added test coverage in `tests/test_provider_secret_scrub.py`.
+
+What this mitigates:
+
+- Reduces risk of later accidental `os.environ` reads exposing provider keys.
+
+What this does NOT fully solve:
+
+- It is not hard isolation between adapters/providers in the same process.
+- In-process memory/object access is still possible if one component is compromised.
+
+Validation:
 
 ```powershell
-uv run pytest tests/test_v9_compat.py::test_chat_request_rejects_bad_provider tests/test_v9_compat.py::test_embed_request_413_on_oversize tests/test_tenant_scoping.py
+uv run pytest tests/test_provider_secret_scrub.py tests/test_tenant_scoping.py tests/test_v9_compat.py::test_chat_request_rejects_bad_provider
 ```
 
 Observed result:
 
 - All tests passed.
-- Route behavior remains correct while client-facing error details are sanitized.
-
 
 
 

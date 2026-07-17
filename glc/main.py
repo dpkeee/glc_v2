@@ -69,6 +69,8 @@ async def lifespan(app: FastAPI):
     app.state.providers = P.build_providers(app.state.cache)
     app.state.router = Router(app.state.providers, chat_route.ORDER)
     app.state.router_providers = P.build_router_providers()
+    if os.getenv("GLC_SCRUB_PROVIDER_KEYS", "1") == "1":
+        P.scrub_provider_key_env()
     app.state.router_pool = RouterPool(app.state.router_providers, chat_route.ROUTER_ORDER)
     app.state.embedders, app.state.embed_order = E.build_embedders()
     app.state.started_at = time.time()
