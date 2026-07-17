@@ -4,7 +4,7 @@ no-update/no-delete surface."""
 from __future__ import annotations
 
 from glc.audit import store
-from glc.audit.store import AuditStore, append, init_store, query, schema_version
+from glc.audit.store import AuditStore, append, init_store, query, schema_version, verify_chain
 
 
 def test_init_then_append():
@@ -41,9 +41,9 @@ def test_store_exposes_no_update_or_delete():
     assert len([n for n in public if n in ("update", "delete", "modify")]) == 0
 
 
-def test_schema_version_is_one():
+def test_schema_version_is_two():
     init_store()
-    assert schema_version() == 1
+    assert schema_version() >= 2
 
 
 def test_query_filters_by_session_and_channel():
@@ -72,3 +72,21 @@ def test_jsonifies_complex_params():
     )
     rows = query(limit=1)
     assert "nested" in rows[0]["params_json"]
+
+
+def test_verify_chain_true_for_valid_appends():
+    init_store()
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="e1")
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="e2")
+    assert verify_chain() is True
+
+
+def test_verify_chain_detects_tamper():
+    init_store()
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="e1")
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="e2")
+
+    with store._conn() as c:
+        c.execute("UPDATE audit_log SET result_json='tampered' WHERE id=1")
+
+    assert verify_chain() is False

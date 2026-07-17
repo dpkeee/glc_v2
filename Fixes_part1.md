@@ -314,27 +314,52 @@ Implemented a partial mitigation to reduce accidental secret exposure from proce
 - Added `scrub_provider_key_env()` and `PROVIDER_SECRET_ENV_VARS` in `glc/providers.py`.
 - Called scrub step at startup in `glc/main.py` after provider objects are created.
 - Added `GLC_SCRUB_PROVIDER_KEYS` toggle (default enabled: `1`).
-- Added test coverage in `tests/test_provider_secret_scrub.py`.
 
-What this mitigates:
+## 2. Erase the audit log (Leak 2)
 
-- Reduces risk of later accidental `os.environ` reads exposing provider keys.
+## Finding
 
-What this does NOT fully solve:
+The audit table could be emptied or modified without an integrity signal. Deletion/tampering left no cryptographic evidence in the log stream.
 
-- It is not hard isolation between adapters/providers in the same process.
-- In-process memory/object access is still possible if one component is compromised.
+## Reproduction
 
-Validation:
+Representative tamper operations:
 
-```powershell
-uv run pytest tests/test_provider_secret_scrub.py tests/test_tenant_scoping.py tests/test_v9_compat.py::test_chat_request_rejects_bad_provider
+```sql
+DELETE FROM audit_log;
+-- or
+UPDATE audit_log SET result_json='tampered' WHERE id=1;
 ```
 
-Observed result:
+Observed result (before fix):
 
-- All tests passed.
+- No built-in hash-chain integrity check failed because no chain existed.
+- Consumers could not prove whether historical records were altered.
 
+## Fix Implemented
+
+Implemented append-only hash chaining in the audit store:
+
+- Added `prev_hash` to `audit_log` schema.
+- Added migration-safe schema upgrade in `init_store()`:
+	- checks `PRAGMA table_info(audit_log)`
+	- `ALTER TABLE ... ADD COLUMN prev_hash` when missing
+	- records schema version `2` in `audit_schema`
+- On every `append()` call:
+	- loads the previous row
+	- computes `sha256` over the previous row's canonical fields
+	- stores that digest in the new row's `prev_hash`
+- Added `verify_chain()` in `glc/audit/store.py` to validate the full chain.
+
+Files changed:
+
+- `glc/audit/store.py`
+- `glc/audit/schema.sql`
+- `glc/audit/__init__.py`
+
+## Security Invariant
+
+Components must not be able to edit or delete their own audit logs.
 
 
 
