@@ -11,10 +11,13 @@ regress them — tests in test_v9_compat.py assert behaviour shape.
 from __future__ import annotations
 
 import asyncio as _asyncio
+import ipaddress
 import json
 import os
+import socket
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any
 
 import yaml
@@ -70,6 +73,115 @@ ROUTER_PROMPT = (
 )
 
 router = APIRouter()
+_FETCH_REDIRECT_LIMIT = 5
+
+
+def _image_fetch_allowlist_entries() -> list[str]:
+    raw = os.getenv("GLC_IMAGE_FETCH_ALLOWLIST", "")
+    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+
+
+def _host_is_allowlisted(host: str, entries: list[str]) -> bool:
+    if not entries:
+        return False
+    host_l = host.lower().rstrip(".")
+    for entry in entries:
+        if entry == "*":
+            return True
+        if "/" in entry:
+            try:
+                net = ipaddress.ip_network(entry, strict=False)
+                ip = ipaddress.ip_address(host_l)
+            except ValueError:
+                continue
+            if ip in net:
+                return True
+            continue
+        if host_l == entry or host_l.endswith(f".{entry}"):
+            return True
+    return False
+
+
+def _ip_is_blocked(ip: ipaddress._BaseAddress) -> bool:
+    return any(
+        (
+            ip.is_loopback,
+            ip.is_private,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )
+    )
+
+
+def _resolve_host_ips(host: str, port: int) -> list[ipaddress._BaseAddress]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise HTTPException(400, f"failed to resolve image host {host!r}: {e}") from e
+    resolved: list[ipaddress._BaseAddress] = []
+    for info in infos:
+        addr = info[4][0]
+        try:
+            resolved.append(ipaddress.ip_address(addr))
+        except ValueError:
+            continue
+    if not resolved:
+        raise HTTPException(400, f"unable to resolve any IP for image host {host!r}")
+    return resolved
+
+
+def _validate_image_fetch_destination(url: str, allowlist_entries: list[str]) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, f"unsupported image url scheme: {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(400, "image url is missing host")
+    if not allowlist_entries:
+        raise HTTPException(400, "image URL fetch disabled: set GLC_IMAGE_FETCH_ALLOWLIST")
+    if not _host_is_allowlisted(host, allowlist_entries):
+        raise HTTPException(400, f"image url host {host!r} is not allowlisted")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    for ip in _resolve_host_ips(host, port):
+        if _ip_is_blocked(ip):
+            raise HTTPException(400, f"blocked image url destination IP: {ip}")
+
+
+async def _fetch_to_data_url(url: str) -> str:
+    import base64
+
+    import httpx as _httpx
+
+    allowlist_entries = _image_fetch_allowlist_entries()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
+        "Accept": "image/*,*/*;q=0.8",
+    }
+    async with _httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers) as c:
+        current = url
+        for hop in range(_FETCH_REDIRECT_LIMIT + 1):
+            _validate_image_fetch_destination(current, allowlist_entries)
+            try:
+                r = await c.get(current)
+            except _httpx.HTTPError as e:
+                raise HTTPException(400, f"failed to fetch image url {current!r}: {e}") from e
+
+            if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                if hop >= _FETCH_REDIRECT_LIMIT:
+                    raise HTTPException(400, f"too many redirects while fetching image url {url!r}")
+                current = str(r.request.url.join(r.headers["location"]))
+                continue
+
+            try:
+                r.raise_for_status()
+            except _httpx.HTTPError as e:
+                raise HTTPException(400, f"failed to fetch image url {current!r}: {e}") from e
+            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
+            b64 = base64.b64encode(r.content).decode()
+            return f"data:{mt};base64,{b64}"
+    raise HTTPException(400, f"failed to fetch image url {url!r}")
 
 
 # ─────────────────────────── helpers (verbatim port) ──────────────────────────
@@ -286,25 +398,6 @@ def _required_caps(req: ChatRequest):
 
 
 async def _resolve_image_urls(messages):
-    import base64
-
-    import httpx as _httpx
-
-    async def _fetch_to_data_url(url: str) -> str:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
-            "Accept": "image/*,*/*;q=0.8",
-        }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
-
     out = []
     for m in messages:
         content = m.get("content")
