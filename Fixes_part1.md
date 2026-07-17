@@ -250,6 +250,72 @@ Implemented tenant-aware read/write scoping:
 
 Usage and cost telemetry must be visible only to records belonging to the requesting tenant.
 
+## 6. Verbose upstream errors leak provider internals
+
+## Finding
+
+When provider calls failed, the gateway returned raw upstream error details to callers. Responses could reveal:
+
+- Provider identity
+- Upstream API hostnames (for example, `generativelanguage.googleapis.com`)
+- Upstream HTTP status details
+- Raw provider error body content
+
+This leaked backend topology and implementation details to unauthenticated or low-trust clients.
+
+## Reproduction
+
+Command (force a provider-side failure path):
+
+```powershell
+curl.exe -i -sS -X POST "https://rainitover--glc-v1-gateway-fastapi-app.modal.run/v1/chat" ^
+	-H "Authorization: Bearer <gateway_token>" ^
+	-H "content-type: application/json" ^
+	-d "{\"provider\":\"gemini\",\"model\":\"invalid-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+```
+
+Observed result (before fix):
+
+- Client-visible error included provider-specific internals and upstream details.
+
+## Fix Implemented
+
+Replaced client-facing `HTTPException` details that embedded provider/error objects with generic messages in `glc/routes/chat.py`.
+
+Updated behavior:
+
+- Chat provider failures now return generic 502/503 messages.
+- Embed provider failures now return generic 429/400/502/503 messages.
+- Full upstream details remain in server-side call logs (`db.log_call(...)`) for debugging.
+
+Examples of sanitized responses:
+
+```text
+502 upstream provider request failed
+503 all providers unavailable
+429 upstream provider rate limited
+400 upstream provider rejected embed request
+502 upstream provider embed request failed
+503 no embedding providers available
+```
+
+## Security Invariant
+
+Client-facing errors must not disclose provider names, upstream hostnames, or raw upstream payloads.
+
+## Verification After Fix
+
+Command:
+
+```powershell
+uv run pytest tests/test_v9_compat.py::test_chat_request_rejects_bad_provider tests/test_v9_compat.py::test_embed_request_413_on_oversize tests/test_tenant_scoping.py
+```
+
+Observed result:
+
+- All tests passed.
+- Route behavior remains correct while client-facing error details are sanitized.
+
 
 
 
