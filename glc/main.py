@@ -12,8 +12,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT.parent / ".env")  # repo .env, if present
@@ -31,8 +31,11 @@ from glc.routes import control as control_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
+from glc.security.auth import is_production_mode, require_gateway_bearer  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
+PRODUCTION_MODE = is_production_mode()
+HIDDEN_DOC_PATHS = ("/docs", "/openapi.json", "/redoc")
 
 
 def _install_sighup_reload() -> None:
@@ -73,7 +76,28 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+app = FastAPI(
+    title="GLC v1 — Gateway for LLMs and Channels",
+    lifespan=lifespan,
+    docs_url=None if PRODUCTION_MODE else "/docs",
+    redoc_url=None if PRODUCTION_MODE else "/redoc",
+    openapi_url=None if PRODUCTION_MODE else "/openapi.json",
+)
+
+
+@app.middleware("http")
+async def _gateway_auth_middleware(request: Request, call_next):
+    if PRODUCTION_MODE:
+        path = request.url.path
+        if path in HIDDEN_DOC_PATHS or path.startswith("/docs/"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        try:
+            require_gateway_bearer(request.headers.get("authorization"))
+        except Exception as exc:  # HTTPException without importing it here
+            status_code = getattr(exc, "status_code", 401)
+            detail = getattr(exc, "detail", "unauthorized")
+            return JSONResponse(status_code=status_code, content={"detail": detail})
+    return await call_next(request)
 
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)
@@ -84,11 +108,16 @@ app.include_router(channels_route.router)
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
+    docs_hint = (
+        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
+        if not PRODUCTION_MODE
+        else "<p>OpenAPI docs are disabled in production.</p>"
+    )
     return (
         "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
         "<h1>GLC v1</h1>"
         "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
-        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
+        f"{docs_hint}"
         "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
         " V9 callers should point at this port unchanged: chat, vision, embed,"
         " batch, cost-by-agent, providers, capabilities, status, calls."
