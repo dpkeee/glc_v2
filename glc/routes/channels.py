@@ -24,8 +24,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.auth import get_gateway_auth_token
 from glc.security.allowlists import allowed
+from glc.security.auth import get_gateway_auth_token
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
 
