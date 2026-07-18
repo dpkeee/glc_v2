@@ -75,6 +75,9 @@ ROUTER_PROMPT = (
 
 router = APIRouter()
 _FETCH_REDIRECT_LIMIT = 5
+_MAX_RESPONSE_SCHEMA_BYTES = 64_000
+_MAX_RESPONSE_SCHEMA_DEPTH = 30
+_MAX_RESPONSE_SCHEMA_NODES = 2_000
 
 
 def _image_fetch_allowlist_entries() -> list[str]:
@@ -438,6 +441,40 @@ def _validate_structured(text: str, schema: dict):
     return obj
 
 
+def _enforce_response_schema_limits(schema: dict[str, Any]) -> None:
+    try:
+        schema_bytes = len(json.dumps(schema, separators=(",", ":")))
+    except Exception as e:
+        raise HTTPException(400, f"invalid response schema: {e}") from e
+    if schema_bytes > _MAX_RESPONSE_SCHEMA_BYTES:
+        raise HTTPException(
+            400,
+            f"response schema too large ({schema_bytes} bytes, max {_MAX_RESPONSE_SCHEMA_BYTES})",
+        )
+
+    stack: list[tuple[Any, int]] = [(schema, 1)]
+    nodes = 0
+    while stack:
+        cur, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_RESPONSE_SCHEMA_NODES:
+            raise HTTPException(
+                400,
+                f"response schema too complex (>{_MAX_RESPONSE_SCHEMA_NODES} nodes)",
+            )
+        if depth > _MAX_RESPONSE_SCHEMA_DEPTH:
+            raise HTTPException(
+                400,
+                f"response schema too deep (>{_MAX_RESPONSE_SCHEMA_DEPTH} levels)",
+            )
+        if isinstance(cur, dict):
+            for v in cur.values():
+                stack.append((v, depth + 1))
+        elif isinstance(cur, list):
+            for v in cur:
+                stack.append((v, depth + 1))
+
+
 # ─────────────────────────── routes ───────────────────────────
 
 
@@ -448,6 +485,8 @@ async def chat(req: ChatRequest, request: Request):
     router_pool = state.router_pool
     messages = _normalize_messages(req)
     tenant = tenant_from_headers(request.headers)
+    if req.response_format and req.response_format.schema_:
+        _enforce_response_schema_limits(req.response_format.schema_)
     if any(P._content_has_image(m.get("content")) for m in messages):
         messages = await _resolve_image_urls(messages)
     system_blocks = _system_blocks(req)
