@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from starlette.websockets import WebSocketDisconnect
 
@@ -14,7 +14,7 @@ def _mk_msg(channel: str) -> ChannelMessage:
         user_handle="user",
         text="hello",
         trust_level="untrusted",
-        arrived_at=datetime.now(timezone.utc),
+        arrived_at=datetime.now(UTC),
         metadata={},
     )
 
@@ -44,7 +44,7 @@ def test_ws_rejects_cross_channel_spoof(app_client, install_token):
         "voice_audio_ref": None,
         "thread_id": None,
         "trust_level": "untrusted",
-        "arrived_at": datetime.now(timezone.utc).isoformat(),
+        "arrived_at": datetime.now(UTC).isoformat(),
         "metadata": {},
     }
 
@@ -54,6 +54,6 @@ def test_ws_rejects_cross_channel_spoof(app_client, install_token):
         assert "dropped: envelope channel mismatch" in msg["error"]
         try:
             ws.receive_text()
-            assert False, "expected websocket close after spoofed envelope"
+            raise AssertionError("expected websocket close after spoofed envelope")
         except WebSocketDisconnect as exc:
             assert exc.code == 1008

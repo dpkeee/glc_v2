@@ -78,9 +78,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                         "envelope_channel": env.channel,
                     },
                 )
-                await websocket.send_text(
-                    json.dumps({"error": "dropped: envelope channel mismatch"})
-                )
+                await websocket.send_text(json.dumps({"error": "dropped: envelope channel mismatch"}))
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
 

@@ -176,7 +176,7 @@ def verify_chain() -> bool:
     first_prev = rows[0].get("prev_hash")
     if first_prev not in (None, ""):
         return False
-    for prev, cur in zip(rows, rows[1:]):
+    for prev, cur in zip(rows, rows[1:], strict=False):
         if cur.get("prev_hash") != _row_digest(prev):
             return False
     return True
