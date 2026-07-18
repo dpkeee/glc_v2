@@ -88,5 +88,7 @@ def get_install_token_for_display() -> str:
     """
     env = os.getenv("GLC_ENV", "").strip().lower()
     if env in {"prod", "production"} and os.getenv("GLC_ALLOW_TOKEN_EXPORT", "0") != "1":
-        raise RuntimeError("token export is disabled in production (set GLC_ALLOW_TOKEN_EXPORT=1 to override)")
+        raise RuntimeError(
+            "token export is disabled in production (set GLC_ALLOW_TOKEN_EXPORT=1 to override)"
+        )
     return get_or_create_install_token()

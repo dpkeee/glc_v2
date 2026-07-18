@@ -31,7 +31,6 @@ from typing import Any
 
 import httpx
 
-
 PROVIDER_SECRET_ENV_VARS = (
     "GEMINI_API_KEY",
     "GITHUB_ACCESS_TOKEN",
@@ -50,6 +49,7 @@ def scrub_provider_key_env() -> None:
     """
     for var in PROVIDER_SECRET_ENV_VARS:
         os.environ.pop(var, None)
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # V9 multimodal helpers

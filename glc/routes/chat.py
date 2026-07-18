@@ -17,8 +17,8 @@ import os
 import socket
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request

@@ -101,6 +101,7 @@ async def _gateway_auth_middleware(request: Request, call_next):
             return JSONResponse(status_code=status_code, content={"detail": detail})
     return await call_next(request)
 
+
 app.include_router(chat_route.router)
 app.include_router(transcribe_route.router)
 app.include_router(speak_route.router)
