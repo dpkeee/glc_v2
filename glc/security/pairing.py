@@ -190,6 +190,11 @@ class PairingStore:
         """Out-of-band pairing for the installation owner. Used by the
         installer to bootstrap the first owner identity. Not exposed
         through HTTP."""
+        env = os.getenv("GLC_ENV", "").strip().lower()
+        if env in {"prod", "production"} and os.getenv("GLC_ALLOW_FORCE_PAIR_OWNER", "0") != "1":
+            raise PermissionError(
+                "force_pair_owner is disabled in production (set GLC_ALLOW_FORCE_PAIR_OWNER=1 to override)"
+            )
         paired_at = time.time()
         with _conn() as c:
             c.execute(

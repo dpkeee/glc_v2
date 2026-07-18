@@ -66,6 +66,24 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
                 await websocket.send_text(json.dumps({"error": f"invalid envelope: {e}"}))
                 continue
 
+            if env.channel != name:
+                audit_append(
+                    channel=name,
+                    channel_user_id=env.channel_user_id,
+                    trust_level=env.trust_level,
+                    event_type="channel_spoof_drop",
+                    result={
+                        "reason": "envelope channel does not match route channel",
+                        "route_channel": name,
+                        "envelope_channel": env.channel,
+                    },
+                )
+                await websocket.send_text(
+                    json.dumps({"error": "dropped: envelope channel mismatch"})
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+
             ok, why = allowed(
                 env.channel,
                 env.channel_user_id,
@@ -144,6 +162,20 @@ async def channel_webhook(name: str, request: Request):
     msg = await adapter.on_message(raw)
     if msg is None:
         return {"status": "ok"}
+
+    if msg.channel != name:
+        audit_append(
+            channel=name,
+            channel_user_id=msg.channel_user_id,
+            trust_level=msg.trust_level,
+            event_type="channel_spoof_drop",
+            result={
+                "reason": "envelope channel does not match route channel",
+                "route_channel": name,
+                "envelope_channel": msg.channel,
+            },
+        )
+        return JSONResponse(status_code=400, content={"error": "envelope channel mismatch"})
 
     limiter = get_rate_limiter()
     pairings = get_pairing_store()

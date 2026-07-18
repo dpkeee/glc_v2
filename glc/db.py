@@ -18,6 +18,13 @@ from pathlib import Path
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 DB_PATH = os.getenv("GLC_GATEWAY_DB", str(DEFAULT_DIR / "gateway.sqlite"))
 
+_MAX_TOKEN_COUNT = 10_000_000
+_MAX_LATENCY_MS = 3_600_000
+_MAX_TEXT_CHARS = 5_000_000
+_MAX_TOOL_CALLS = 10_000
+_MAX_RETRIES = 100
+_MAX_EMBED_DIM = 1_000_000
+
 
 def _ensure_parent() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +84,51 @@ def init() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_tenant_ts ON calls(tenant, ts DESC)")
 
 
+def _require_non_empty_str(name: str, value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
+def _require_bounded_int(name: str, value: object, *, min_value: int = 0, max_value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if value < min_value or value > max_value:
+        raise ValueError(f"{name} out of range [{min_value}, {max_value}]")
+    return value
+
+
+def _validate_log_call_inputs(
+    provider,
+    model,
+    input_tokens,
+    output_tokens,
+    latency_ms,
+    prompt_chars,
+    response_chars,
+    cache_create_tokens,
+    cache_read_tokens,
+    tool_calls,
+    embed_dim,
+    retries,
+) -> None:
+    _require_non_empty_str("provider", provider)
+    _require_non_empty_str("model", model)
+
+    _require_bounded_int("input_tokens", input_tokens, max_value=_MAX_TOKEN_COUNT)
+    _require_bounded_int("output_tokens", output_tokens, max_value=_MAX_TOKEN_COUNT)
+    _require_bounded_int("cache_create_tokens", cache_create_tokens, max_value=_MAX_TOKEN_COUNT)
+    _require_bounded_int("cache_read_tokens", cache_read_tokens, max_value=_MAX_TOKEN_COUNT)
+    _require_bounded_int("latency_ms", latency_ms, max_value=_MAX_LATENCY_MS)
+    _require_bounded_int("prompt_chars", prompt_chars, max_value=_MAX_TEXT_CHARS)
+    _require_bounded_int("response_chars", response_chars, max_value=_MAX_TEXT_CHARS)
+    _require_bounded_int("tool_calls", tool_calls, max_value=_MAX_TOOL_CALLS)
+    _require_bounded_int("retries", retries, max_value=_MAX_RETRIES)
+
+    if embed_dim is not None:
+        _require_bounded_int("embed_dim", embed_dim, min_value=1, max_value=_MAX_EMBED_DIM)
+
+
 def log_call(
     provider,
     model,
@@ -102,6 +154,21 @@ def log_call(
     tenant=None,
     retries=0,
 ) -> None:
+    _validate_log_call_inputs(
+        provider=provider,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        latency_ms=latency_ms,
+        prompt_chars=prompt_chars,
+        response_chars=response_chars,
+        cache_create_tokens=cache_create_tokens,
+        cache_read_tokens=cache_read_tokens,
+        tool_calls=tool_calls,
+        embed_dim=embed_dim,
+        retries=retries,
+    )
+
     with conn() as c:
         c.execute(
             """INSERT INTO calls (ts, provider, model, input_tokens, output_tokens,

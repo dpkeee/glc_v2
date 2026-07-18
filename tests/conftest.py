@@ -23,6 +23,7 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.config as _cfg
 
     _cfg.CONFIG_DIR = cfg
+    _cfg._INSTALL_TOKEN_CACHE = None
     import glc.security.pairing as _p
 
     _p._singleton = None
@@ -52,6 +53,6 @@ def app_client():
 @pytest.fixture
 def install_token(app_client):
     """Returns the per-installation token created during boot."""
-    from glc.config import install_token_path
+    from glc.config import get_or_create_install_token
 
-    return install_token_path().read_text().strip()
+    return get_or_create_install_token()
